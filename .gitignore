@@ -7,3 +7,6 @@ backend/target/
 *.secret.json
 .mops/
 .mops/
+
+# backups created by 'thebes-deploy add auth --force'
+*.before-force

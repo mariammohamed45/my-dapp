@@ -1,4 +1,3 @@
-
 // thebes.ts
 // Client for the Thebes backend canister.
 
@@ -32,13 +31,45 @@ function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(clean.length / 2);
 
   for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(
+    const value = parseInt(
       clean.slice(i * 2, i * 2 + 2),
       16
     );
+
+    if (Number.isNaN(value)) {
+      throw new Error("invalid hex value");
+    }
+
+    bytes[i] = value;
   }
 
   return bytes;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Memphis session
+// ─────────────────────────────────────────────────────────────
+
+function getSessionTokenHex(): string {
+  const api = (
+    window as typeof window & {
+      MemphisPasskey?: {
+        loadSession?: () => {
+          session_token_hex?: string;
+        } | null;
+      };
+    }
+  ).MemphisPasskey;
+
+  const session = api?.loadSession?.();
+
+  if (!session?.session_token_hex) {
+    throw new Error(
+      "Please sign in with your Memphis passkey first."
+    );
+  }
+
+  return session.session_token_hex;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -94,9 +125,7 @@ function ulebDecode(
     const byte = buf[off++];
 
     if (byte === undefined) {
-      throw new Error(
-        "candid: truncated uleb128"
-      );
+      throw new Error("candid: truncated uleb128");
     }
 
     result |=
@@ -121,9 +150,7 @@ function slebDecode(
     const byte = buf[off++];
 
     if (byte === undefined) {
-      throw new Error(
-        "candid: truncated sleb128"
-      );
+      throw new Error("candid: truncated sleb128");
     }
 
     result |=
@@ -155,14 +182,13 @@ const MAGIC = [
 const TYPE_NAT = -3n;
 const TYPE_INT = -4n;
 const TYPE_BOOL = -2n;
+const TYPE_NAT8 = -5n;
 const TYPE_TEXT = -15n;
 const TYPE_VEC = -19n;
 const TYPE_RECORD = -20n;
 
 // ─────────────────────────────────────────────────────────────
 // Candid record field IDs
-// IMPORTANT:
-// These IDs must match the field names in main.mo.
 // ─────────────────────────────────────────────────────────────
 
 const FIELD_ID_ID = 23515n;
@@ -178,11 +204,8 @@ const FIELD_ID_UPDATED_AT = 2196848654n;
 // Candid encoders
 // ─────────────────────────────────────────────────────────────
 
-function encodeTextValue(
-  text: string
-): number[] {
-  const utf8 =
-    new TextEncoder().encode(text);
+function encodeTextValue(text: string): number[] {
+  const utf8 = new TextEncoder().encode(text);
 
   return [
     ...uleb(BigInt(utf8.length)),
@@ -190,46 +213,79 @@ function encodeTextValue(
   ];
 }
 
-export function encodeEmpty(): string {
-  return bytesToHex(
-    new Uint8Array([
-      ...MAGIC,
-      0,
-      0,
-    ])
-  );
+function encodeBlobValue(hex: string): number[] {
+  const bytes = hexToBytes(hex);
+
+  return [
+    ...uleb(BigInt(bytes.length)),
+    ...bytes,
+  ];
 }
 
-export function encodeText(
-  text: string
+// (blob)
+function encodeSessionOnly(
+  sessionHex: string
 ): string {
   return bytesToHex(
     new Uint8Array([
       ...MAGIC,
-      0,
+
+      // type table count
       1,
+
+      // type 0 = vec nat8
+      ...sleb(TYPE_VEC),
+      ...sleb(TYPE_NAT8),
+
+      // argument count
+      1,
+
+      // argument type = type 0
+      0,
+
+      // value
+      ...encodeBlobValue(sessionHex),
+    ])
+  );
+}
+
+// (blob, text, text, text, text)
+function encodeSessionAndFourTexts(
+  sessionHex: string,
+  title: string,
+  body: string,
+  category: string,
+  color: string
+): string {
+  return bytesToHex(
+    new Uint8Array([
+      ...MAGIC,
+
+      1,
+
+      ...sleb(TYPE_VEC),
+      ...sleb(TYPE_NAT8),
+
+      5,
+
+      0,
       ...sleb(TYPE_TEXT),
-      ...encodeTextValue(text),
+      ...sleb(TYPE_TEXT),
+      ...sleb(TYPE_TEXT),
+      ...sleb(TYPE_TEXT),
+
+      ...encodeBlobValue(sessionHex),
+      ...encodeTextValue(title),
+      ...encodeTextValue(body),
+      ...encodeTextValue(category),
+      ...encodeTextValue(color),
     ])
   );
 }
 
-function encodeNat(
-  id: bigint
-): string {
-  return bytesToHex(
-    new Uint8Array([
-      ...MAGIC,
-      0,
-      1,
-      ...sleb(TYPE_NAT),
-      ...uleb(id),
-    ])
-  );
-}
-
-// (nat, text, text, text, text)
-function encodeNatAndThreeTexts(
+// (blob, nat, text, text, text, text)
+function encodeSessionNatAndFourTexts(
+  sessionHex: string,
   id: bigint,
   title: string,
   body: string,
@@ -239,15 +295,22 @@ function encodeNatAndThreeTexts(
   return bytesToHex(
     new Uint8Array([
       ...MAGIC,
-      0,
-      5,
 
+      1,
+
+      ...sleb(TYPE_VEC),
+      ...sleb(TYPE_NAT8),
+
+      6,
+
+      0,
       ...sleb(TYPE_NAT),
       ...sleb(TYPE_TEXT),
       ...sleb(TYPE_TEXT),
       ...sleb(TYPE_TEXT),
       ...sleb(TYPE_TEXT),
 
+      ...encodeBlobValue(sessionHex),
       ...uleb(id),
       ...encodeTextValue(title),
       ...encodeTextValue(body),
@@ -257,28 +320,27 @@ function encodeNatAndThreeTexts(
   );
 }
 
-// (text, text, text, text)
-function encodeFourTexts(
-  title: string,
-  body: string,
-  category: string,
-  color: string
+// (blob, nat)
+function encodeSessionAndNat(
+  sessionHex: string,
+  id: bigint
 ): string {
   return bytesToHex(
     new Uint8Array([
       ...MAGIC,
+
+      1,
+
+      ...sleb(TYPE_VEC),
+      ...sleb(TYPE_NAT8),
+
+      2,
+
       0,
-      4,
+      ...sleb(TYPE_NAT),
 
-      ...sleb(TYPE_TEXT),
-      ...sleb(TYPE_TEXT),
-      ...sleb(TYPE_TEXT),
-      ...sleb(TYPE_TEXT),
-
-      ...encodeTextValue(title),
-      ...encodeTextValue(body),
-      ...encodeTextValue(category),
-      ...encodeTextValue(color),
+      ...encodeBlobValue(sessionHex),
+      ...uleb(id),
     ])
   );
 }
@@ -293,16 +355,13 @@ function readText(
 ): [string, number] {
   let len: bigint;
 
-  [len, off] =
-    ulebDecode(buf, off);
+  [len, off] = ulebDecode(buf, off);
 
   const size = Number(len);
   const end = off + size;
 
   if (end > buf.length) {
-    throw new Error(
-      "candid: truncated text"
-    );
+    throw new Error("candid: truncated text");
   }
 
   return [
@@ -347,11 +406,7 @@ function readTypeTable(
 ): [CandidType[], number] {
   const types: CandidType[] = [];
 
-  for (
-    let i = 0n;
-    i < count;
-    i++
-  ) {
+  for (let i = 0n; i < count; i++) {
     let typeCode: bigint;
 
     [typeCode, off] =
@@ -418,17 +473,12 @@ function readTypeTable(
   return [types, off];
 }
 
-// ─────────────────────────────────────────────────────────────
-// Candid value decoder
-// ─────────────────────────────────────────────────────────────
-
 function decodeValue(
   buf: Uint8Array,
   off: number,
   type: bigint,
   types: CandidType[]
 ): [unknown, number] {
-
   if (type === TYPE_NAT) {
     return readNat(buf, off);
   }
@@ -439,17 +489,12 @@ function decodeValue(
 
   if (type === TYPE_BOOL) {
     if (off >= buf.length) {
-      throw new Error(
-        "candid: truncated bool"
-      );
+      throw new Error("candid: truncated bool");
     }
 
     const value = buf[off];
 
-    if (
-      value !== 0 &&
-      value !== 1
-    ) {
+    if (value !== 0 && value !== 1) {
       throw new Error(
         `candid: invalid bool value ${value}`
       );
@@ -466,8 +511,8 @@ function decodeValue(
   }
 
   if (type >= 0n) {
-    const index = Number(type);
-    const definition = types[index];
+    const definition =
+      types[Number(type)];
 
     if (!definition) {
       throw new Error(
@@ -475,9 +520,7 @@ function decodeValue(
       );
     }
 
-    if (
-      definition.kind === "vec"
-    ) {
+    if (definition.kind === "vec") {
       let length: bigint;
 
       [length, off] =
@@ -509,14 +552,11 @@ function decodeValue(
       ];
     }
 
-    if (
-      definition.kind === "record"
-    ) {
+    if (definition.kind === "record") {
       const values: unknown[] = [];
 
       for (
-        const field of
-          definition.fields
+        const field of definition.fields
       ) {
         let value: unknown;
 
@@ -544,14 +584,13 @@ function decodeValue(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Decode primitive reply
+// Primitive reply decoder
 // ─────────────────────────────────────────────────────────────
 
 export function decodeReply(
   hex: string
 ): string | bigint | boolean {
-  const buf =
-    hexToBytes(hex);
+  const buf = hexToBytes(hex);
 
   if (
     buf.length < 4 ||
@@ -623,14 +662,13 @@ export function decodeReply(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Decode Note list
+// Note list decoder
 // ─────────────────────────────────────────────────────────────
 
 export function decodeNotes(
   hex: string
 ): Note[] {
-  const buf =
-    hexToBytes(hex);
+  const buf = hexToBytes(hex);
 
   if (
     buf.length < 4 ||
@@ -939,7 +977,7 @@ async function fetchWithRetry(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Query
+// Query - kept for compatibility, but private list does NOT use it
 // ─────────────────────────────────────────────────────────────
 
 export async function query(
@@ -981,7 +1019,7 @@ export async function query(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Submit call
+// Submit update call
 // ─────────────────────────────────────────────────────────────
 
 async function submitCall(
@@ -1026,6 +1064,64 @@ async function submitCall(
   }
 
   return JSON.parse(text);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Raw receipt
+// ─────────────────────────────────────────────────────────────
+
+async function pollReceiptRaw(
+  hashHex: string
+): Promise<string> {
+  const deadline =
+    Date.now() + 30_000;
+
+  let transientPolls = 0;
+
+  while (
+    Date.now() < deadline
+  ) {
+    try {
+      const response =
+        await fetchWithRetry(
+          `${BASE}/api/receipt?hash=${hashHex}`
+        );
+
+      if (response.found) {
+        if (
+          response.status ===
+          "success"
+        ) {
+          return response.reply || "";
+        }
+
+        throw new Error(
+          response.error ||
+            "call failed on chain"
+        );
+      }
+    } catch (e) {
+      transientPolls++;
+
+      if (
+        transientPolls > 10
+      ) {
+        throw e;
+      }
+    }
+
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          500
+        )
+    );
+  }
+
+  throw new Error(
+    "timed out waiting for the chain's receipt"
+  );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1101,68 +1197,13 @@ export async function call(
     );
   }
 
-  return pollReceipt(
-    response.message_hash
-  );
-}
-
-// ─────────────────────────────────────────────────────────────
-// Receipt
-// ─────────────────────────────────────────────────────────────
-
-async function pollReceipt(
-  hashHex: string
-): Promise<string | bigint | boolean> {
-  const deadline =
-    Date.now() + 30_000;
-
-  let transientPolls = 0;
-
-  while (
-    Date.now() < deadline
-  ) {
-    try {
-      const response =
-        await fetchWithRetry(
-          `${BASE}/api/receipt?hash=${hashHex}`
-        );
-
-      if (response.found) {
-        if (
-          response.status ===
-          "success"
-        ) {
-          return decodeReply(
-            response.reply || ""
-          );
-        }
-
-        throw new Error(
-          response.error ||
-            "call failed on chain"
-        );
-      }
-    } catch (e) {
-      transientPolls++;
-
-      if (
-        transientPolls > 10
-      ) {
-        throw e;
-      }
-    }
-
-    await new Promise(
-      (resolve) =>
-        setTimeout(
-          resolve,
-          500
-        )
+  const rawReply =
+    await pollReceiptRaw(
+      response.message_hash
     );
-  }
 
-  throw new Error(
-    "timed out waiting for the chain's receipt"
+  return decodeReply(
+    rawReply
   );
 }
 
@@ -1176,10 +1217,14 @@ export async function addNote(
   category: string,
   color: string
 ): Promise<bigint> {
+  const session =
+    getSessionTokenHex();
+
   const result =
     await call(
       "add",
-      encodeFourTexts(
+      encodeSessionAndFourTexts(
+        session,
         title,
         body,
         category,
@@ -1199,40 +1244,82 @@ export async function addNote(
   return result;
 }
 
-export async function listNotes(): Promise<
-  Note[]
-> {
-  const response =
+export async function listNotes(): Promise<Note[]> {
+  const session =
+    getSessionTokenHex();
+
+  const sender =
+    demoSender();
+
+  const nonceResponse =
     await fetchWithRetry(
-      `${BASE}/api/query`,
+      `${BASE}/api/next_nonce?sender=${sender}`,
       {
-        method: "POST",
-        headers: {
-          "content-type":
-            "application/json",
-        },
-        body: JSON.stringify({
-          canister_id:
-            BACKEND_CANISTER_ID,
-          method: "list",
-          arg: encodeEmpty(),
-          sender: demoSender(),
-        }),
+        cache: "no-store",
       }
     );
 
   if (
-    response.status !==
-    "success"
+    typeof nonceResponse.next_nonce !==
+    "number"
   ) {
     throw new Error(
-      response.error ||
-        "list failed"
+      "malformed next_nonce reply"
     );
   }
 
+  let response =
+    await submitCall(
+      "list",
+      encodeSessionOnly(session),
+      sender,
+      nonceResponse.next_nonce
+    );
+
+  if (
+    !response.queued &&
+    typeof response.error ===
+      "string" &&
+    /nonce .* already used/i.test(
+      response.error
+    )
+  ) {
+    const match =
+      response.error.match(
+        /last seen:\s*(\d+)/i
+      );
+
+    const recoveredNonce =
+      match
+        ? Number(match[1]) + 1
+        : nonceResponse.next_nonce + 1;
+
+    response =
+      await submitCall(
+        "list",
+        encodeSessionOnly(session),
+        sender,
+        recoveredNonce
+      );
+  }
+
+  if (
+    !response.queued ||
+    !response.message_hash
+  ) {
+    throw new Error(
+      response.error ||
+        "list call rejected"
+    );
+  }
+
+  const rawReply =
+    await pollReceiptRaw(
+      response.message_hash
+    );
+
   return decodeNotes(
-    response.reply || ""
+    rawReply
   );
 }
 
@@ -1243,10 +1330,14 @@ export async function editNote(
   category: string,
   color: string
 ): Promise<boolean> {
+  const session =
+    getSessionTokenHex();
+
   const result =
     await call(
       "edit",
-      encodeNatAndThreeTexts(
+      encodeSessionNatAndFourTexts(
+        session,
         id,
         title,
         body,
@@ -1270,10 +1361,16 @@ export async function editNote(
 export async function togglePin(
   id: bigint
 ): Promise<boolean> {
+  const session =
+    getSessionTokenHex();
+
   const result =
     await call(
       "togglePin",
-      encodeNat(id)
+      encodeSessionAndNat(
+        session,
+        id
+      )
     );
 
   if (
@@ -1291,10 +1388,16 @@ export async function togglePin(
 export async function removeNote(
   id: bigint
 ): Promise<boolean> {
+  const session =
+    getSessionTokenHex();
+
   const result =
     await call(
       "remove",
-      encodeNat(id)
+      encodeSessionAndNat(
+        session,
+        id
+      )
     );
 
   if (
@@ -1308,4 +1411,3 @@ export async function removeNote(
 
   return result;
 }
-

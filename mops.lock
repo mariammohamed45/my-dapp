@@ -1,12 +1,15 @@
 {
   "version": 3,
-  "mopsTomlDepsHash": "257e66021ab13bec12e6d6cbb160394964e8cbb69761f53f5627d88a4dc3dab4",
+  "mopsTomlDepsHash": "7312b141bca70624008c25abc8a00d165e10f0757b40fbd316c3c3e8f9f82924",
+  "localDepsHash": "a65a1ac31bad468e0bd4bae61582934005b06bd38d8ed1b559410b9c0e886199",
   "deps": {
     "base": "0.13.2",
-    "core": "2.6.1"
+    "core": "2.6.1",
+    "thebes-lib": "./thebes-lib"
   },
   "graph": {
     "base@0.13.2": {},
+    "core@2.5.0": {},
     "core@2.6.1": {}
   },
   "hashes": {

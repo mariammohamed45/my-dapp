@@ -6,6 +6,8 @@ import {
   removeNote,
   togglePin,
 } from "./thebes";
+import MemphisGate from "./MemphisGate";
+import { useMemphis } from "./useMemphis";
 
 type Note = {
   id: bigint;
@@ -48,6 +50,8 @@ function formatDate(timestamp: bigint): string {
 }
 
 export default function App() {
+  const auth = useMemphis();
+
   const [notes, setNotes] = useState<Note[]>([]);
 
   const [title, setTitle] = useState("");
@@ -56,7 +60,8 @@ export default function App() {
   const [color, setColor] = useState(NOTE_COLORS[0]);
 
   const [search, setSearch] = useState("");
-  const [selectedCategory, setSelectedCategory] = useState("All");
+  const [selectedCategory, setSelectedCategory] =
+    useState("All");
 
   const [editingId, setEditingId] =
     useState<bigint | null>(null);
@@ -70,6 +75,11 @@ export default function App() {
   const [darkMode, setDarkMode] = useState(false);
 
   async function loadNotes() {
+    if (!auth.signedIn) {
+      setNotes([]);
+      return;
+    }
+
     try {
       setError("");
 
@@ -81,9 +91,25 @@ export default function App() {
     }
   }
 
+  /*
+   * Load notes only after the user is signed in.
+   *
+   * When the user signs out, clear the old user's notes
+   * immediately so they can never remain visible to the
+   * next user on the same browser.
+   */
   useEffect(() => {
+    if (!auth.signedIn) {
+      setNotes([]);
+      setError("");
+      clearForm();
+      setSearch("");
+      setSelectedCategory("All");
+      return;
+    }
+
     void loadNotes();
-  }, []);
+  }, [auth.signedIn]);
 
   useEffect(() => {
     document.documentElement.dataset.theme =
@@ -97,7 +123,9 @@ export default function App() {
 
     return [
       "All",
-      ...Array.from(new Set([...CATEGORIES, ...existing])),
+      ...Array.from(
+        new Set([...CATEGORIES, ...existing])
+      ),
     ];
   }, [notes]);
 
@@ -139,6 +167,13 @@ export default function App() {
     e: React.FormEvent
   ) {
     e.preventDefault();
+
+    if (!auth.signedIn) {
+      setError(
+        "Please sign in with your Memphis passkey first."
+      );
+      return;
+    }
 
     if (!title.trim() || !body.trim()) {
       setError(
@@ -193,6 +228,13 @@ export default function App() {
   }
 
   async function handlePin(id: bigint) {
+    if (!auth.signedIn) {
+      setError(
+        "Please sign in with your Memphis passkey first."
+      );
+      return;
+    }
+
     try {
       setLoading(true);
       setError("");
@@ -212,6 +254,14 @@ export default function App() {
       return;
     }
 
+    if (!auth.signedIn) {
+      setError(
+        "Please sign in with your Memphis passkey first."
+      );
+      setDeleteId(null);
+      return;
+    }
+
     try {
       setLoading(true);
       setError("");
@@ -226,6 +276,51 @@ export default function App() {
     } finally {
       setLoading(false);
     }
+  }
+
+  /*
+   * Authentication gate.
+   *
+   * Nothing from the private notes application is rendered
+   * before Memphis authentication succeeds.
+   */
+  if (!auth.signedIn) {
+    return (
+      <main className="notes-page">
+        <header className="notes-header">
+          <div>
+            <p className="eyebrow">
+              MY-DAPP
+            </p>
+
+            <h1>
+              Your ideas.
+              <br />
+              Your space.
+            </h1>
+
+            <p>
+              Sign in to access your private notes.
+            </p>
+          </div>
+
+          <div className="header-actions">
+            <button
+              className="theme-toggle"
+              type="button"
+              onClick={() =>
+                setDarkMode((value) => !value)
+              }
+              aria-label="Toggle dark mode"
+            >
+              {darkMode ? "☀" : "☾"}
+            </button>
+          </div>
+        </header>
+
+        <MemphisGate auth={auth} />
+      </main>
+    );
   }
 
   return (
@@ -250,6 +345,15 @@ export default function App() {
             Capture, organize and manage
             your thoughts.
           </p>
+
+          {/* Signed-in identity */}
+
+          <div className="signed-in-user">
+            <span>Signed in as</span>
+            <strong>
+              {auth.displayName}
+            </strong>
+          </div>
         </div>
 
         <div className="header-actions">
@@ -273,6 +377,17 @@ export default function App() {
                 : " notes"}
             </span>
           </div>
+
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => void auth.signOut()}
+            disabled={auth.busy}
+          >
+            {auth.busy
+              ? "Signing out..."
+              : "Sign out"}
+          </button>
 
         </div>
 
