@@ -7,6 +7,10 @@
 // any data. `list` moved from a plain query fetch to the same
 // call→nonce→submit→poll-receipt flow as the write methods, since
 // identity verification requires an update call.
+//
+// CHANGE FROM TASK 2: notes now carry an `isShared` flag, toggled via
+// toggleShare(). (Named isShared, not shared — `shared` is a reserved
+// keyword in Motoko and can't be used as a record field name.)
 
 export const BACKEND_CANISTER_ID = 55053167656008;
 
@@ -18,9 +22,31 @@ export type Note = {
   body: string;
   category: string;
   pinned: boolean;
+  isShared: boolean;
   color: string;
   createdAt: bigint;
   updatedAt: bigint;
+};
+
+// A note as returned by feed() — includes the owner, since feed() shows
+// notes from every user, not just the caller's own.
+export type FeedNote = Note & {
+  // Short display label derived from the owner's Principal bytes (hex).
+  // NOT the canonical Principal.toText() (base32 + checksum) — that
+  // encoding isn't implemented here. Good enough to tell authors apart
+  // in the feed; not a real identity string.
+  author: string;
+};
+
+// A single tip transfer, as returned by getMyTips(). `from`/`to` are
+// short display labels (same hex-prefix scheme as FeedNote.author),
+// not full Principal.toText() values.
+export type TipRecord = {
+  from: string;
+  to: string;
+  amount: bigint;
+  noteId: bigint;
+  timestamp: bigint;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -186,22 +212,27 @@ function candidFieldHash(name: string): bigint {
   return h;
 }
 
+void candidFieldHash;
+
 const FIELD_ID_ID = 23515n;
 const FIELD_ID_TITLE = 272307608n;
 const FIELD_ID_BODY = 1092319906n;
 const FIELD_ID_CATEGORY = 2909547262n;
 const FIELD_ID_PINNED = 2249497368n;
+const FIELD_ID_SHARED = 1972697647n; // candidFieldHash("isShared")
 const FIELD_ID_COLOR = 1247572323n;
 const FIELD_ID_CREATED_AT = 1240611067n;
 const FIELD_ID_UPDATED_AT = 2196848654n;
-// New in Task 2 — present on the wire but never read into the Note
-// the UI displays (list() only ever returns the caller's own notes,
-// so surfacing owner separately would be redundant).
-// Computed for documentation/parity with Backend.mo's `owner` field.
-// Not read anywhere: list() only ever returns the caller's own notes,
-// so surfacing owner separately would be redundant. Prefixed with
-// void to satisfy noUnusedLocals without deleting the derivation.
-void candidFieldHash("owner");
+// New in Task 2 — present on the wire but only read by decodeFeedNotes()
+// (feed() shows notes from every user, so the owner matters there).
+// list() ignores it: every note it returns already belongs to the caller.
+const FIELD_ID_OWNER = 947296307n;
+
+const FIELD_ID_TIP_FROM = 1136829802n;
+const FIELD_ID_TIP_TO = 25979n;
+const FIELD_ID_TIP_AMOUNT = 3573748184n;
+const FIELD_ID_TIP_NOTE_ID = 833992813n;
+const FIELD_ID_TIP_TIMESTAMP = 2781795542n;
 
 // ─────────────────────────────────────────────────────────────
 // Candid encoders
@@ -302,6 +333,18 @@ function encodeTokenAndNat(
 ): string {
   return encodeTokenArgs(tokenHex, [
     { type: TYPE_NAT, valueBytes: uleb(id) },
+  ]);
+}
+
+// (blob token, nat noteId, nat amount) — tip()
+function encodeTokenAndTwoNats(
+  tokenHex: string,
+  a: bigint,
+  b: bigint
+): string {
+  return encodeTokenArgs(tokenHex, [
+    { type: TYPE_NAT, valueBytes: uleb(a) },
+    { type: TYPE_NAT, valueBytes: uleb(b) },
   ]);
 }
 
@@ -855,6 +898,9 @@ export function decodeNotes(
     const pinned =
       fields.get(FIELD_ID_PINNED);
 
+    const isShared =
+      fields.get(FIELD_ID_SHARED);
+
     const color =
       fields.get(FIELD_ID_COLOR);
 
@@ -874,6 +920,7 @@ export function decodeNotes(
       typeof body !== "string" ||
       typeof category !== "string" ||
       typeof pinned !== "boolean" ||
+      typeof isShared !== "boolean" ||
       typeof color !== "string" ||
       typeof createdAt !== "bigint" ||
       typeof updatedAt !== "bigint"
@@ -886,6 +933,7 @@ export function decodeNotes(
           body,
           category,
           pinned,
+          isShared,
           color,
           createdAt,
           updatedAt,
@@ -908,9 +956,409 @@ export function decodeNotes(
       body,
       category,
       pinned,
+      isShared,
       color,
       createdAt,
       updatedAt,
+    };
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// Decode feed() reply — same [Note] shape on the wire, but this time
+// we also read the `owner` field (readPrincipal already handles the
+// Candid principal tag+length encoding) and turn it into a short
+// display label.
+// ─────────────────────────────────────────────────────────────
+
+export function decodeFeedNotes(
+  hex: string
+): FeedNote[] {
+  const buf =
+    hexToBytes(hex);
+
+  if (
+    buf.length < 4 ||
+    buf[0] !== 0x44 ||
+    buf[1] !== 0x49 ||
+    buf[2] !== 0x44 ||
+    buf[3] !== 0x4c
+  ) {
+    throw new Error(
+      "candid: bad magic in feed reply"
+    );
+  }
+
+  let off = 4;
+
+  let tableCount: bigint;
+
+  [tableCount, off] =
+    ulebDecode(buf, off);
+
+  const [types, newOff] =
+    readTypeTable(
+      buf,
+      off,
+      tableCount
+    );
+
+  off = newOff;
+
+  let argCount: bigint;
+
+  [argCount, off] =
+    ulebDecode(buf, off);
+
+  if (argCount !== 1n) {
+    throw new Error(
+      `candid: expected one return value, got ${argCount}`
+    );
+  }
+
+  let returnType: bigint;
+
+  [returnType, off] =
+    slebDecode(buf, off);
+
+  const [value] =
+    decodeValue(
+      buf,
+      off,
+      returnType,
+      types
+    );
+
+  if (!Array.isArray(value)) {
+    throw new Error(
+      "candid: expected a vector of notes"
+    );
+  }
+
+  let recordType: bigint | null = null;
+
+  if (returnType >= 0n) {
+    const vectorDefinition =
+      types[Number(returnType)];
+
+    if (
+      vectorDefinition &&
+      vectorDefinition.kind === "vec"
+    ) {
+      recordType =
+        vectorDefinition.elementType;
+    }
+  }
+
+  if (
+    recordType === null ||
+    recordType < 0n
+  ) {
+    throw new Error(
+      "candid: invalid Note vector type"
+    );
+  }
+
+  const recordDefinition =
+    types[Number(recordType)];
+
+  if (
+    !recordDefinition ||
+    recordDefinition.kind !== "record"
+  ) {
+    throw new Error(
+      "candid: invalid Note record definition"
+    );
+  }
+
+  return value.map((item) => {
+    if (
+      !Array.isArray(item) ||
+      item.length !==
+        recordDefinition.fields.length
+    ) {
+      throw new Error(
+        "candid: invalid Note record"
+      );
+    }
+
+    const fields =
+      new Map<bigint, unknown>();
+
+    for (
+      let i = 0;
+      i < recordDefinition.fields.length;
+      i++
+    ) {
+      fields.set(
+        recordDefinition.fields[i].id,
+        item[i]
+      );
+    }
+
+    const id =
+      fields.get(FIELD_ID_ID);
+
+    const title =
+      fields.get(FIELD_ID_TITLE);
+
+    const body =
+      fields.get(FIELD_ID_BODY);
+
+    const category =
+      fields.get(FIELD_ID_CATEGORY);
+
+    const pinned =
+      fields.get(FIELD_ID_PINNED);
+
+    const isShared =
+      fields.get(FIELD_ID_SHARED);
+
+    const color =
+      fields.get(FIELD_ID_COLOR);
+
+    const createdAt =
+      fields.get(FIELD_ID_CREATED_AT);
+
+    const updatedAt =
+      fields.get(FIELD_ID_UPDATED_AT);
+
+    const owner =
+      fields.get(FIELD_ID_OWNER);
+
+    if (
+      typeof id !== "bigint" ||
+      typeof title !== "string" ||
+      typeof body !== "string" ||
+      typeof category !== "string" ||
+      typeof pinned !== "boolean" ||
+      typeof isShared !== "boolean" ||
+      typeof color !== "string" ||
+      typeof createdAt !== "bigint" ||
+      typeof updatedAt !== "bigint" ||
+      typeof owner !== "string"
+    ) {
+      console.log(
+        "Decoded FeedNote fields:",
+        {
+          id,
+          title,
+          body,
+          category,
+          pinned,
+          isShared,
+          color,
+          createdAt,
+          updatedAt,
+          owner,
+        }
+      );
+
+      console.log(
+        "Candid record fields:",
+        recordDefinition.fields
+      );
+
+      throw new Error(
+        "candid: invalid FeedNote fields"
+      );
+    }
+
+    return {
+      id,
+      title,
+      body,
+      category,
+      pinned,
+      isShared,
+      color,
+      createdAt,
+      updatedAt,
+      author: `Author ${owner.slice(0, 8)}`,
+    };
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// Decode getMyTips() reply — a vector of TipRecord. `from`/`to` are
+// Candid principals, decoded via readPrincipal and shortened the same
+// way FeedNote.author is.
+// ─────────────────────────────────────────────────────────────
+
+export function decodeTips(
+  hex: string
+): TipRecord[] {
+  const buf =
+    hexToBytes(hex);
+
+  if (
+    buf.length < 4 ||
+    buf[0] !== 0x44 ||
+    buf[1] !== 0x49 ||
+    buf[2] !== 0x44 ||
+    buf[3] !== 0x4c
+  ) {
+    throw new Error(
+      "candid: bad magic in tips reply"
+    );
+  }
+
+  let off = 4;
+
+  let tableCount: bigint;
+
+  [tableCount, off] =
+    ulebDecode(buf, off);
+
+  const [types, newOff] =
+    readTypeTable(
+      buf,
+      off,
+      tableCount
+    );
+
+  off = newOff;
+
+  let argCount: bigint;
+
+  [argCount, off] =
+    ulebDecode(buf, off);
+
+  if (argCount !== 1n) {
+    throw new Error(
+      `candid: expected one return value, got ${argCount}`
+    );
+  }
+
+  let returnType: bigint;
+
+  [returnType, off] =
+    slebDecode(buf, off);
+
+  const [value] =
+    decodeValue(
+      buf,
+      off,
+      returnType,
+      types
+    );
+
+  if (!Array.isArray(value)) {
+    throw new Error(
+      "candid: expected a vector of tips"
+    );
+  }
+
+  let recordType: bigint | null = null;
+
+  if (returnType >= 0n) {
+    const vectorDefinition =
+      types[Number(returnType)];
+
+    if (
+      vectorDefinition &&
+      vectorDefinition.kind === "vec"
+    ) {
+      recordType =
+        vectorDefinition.elementType;
+    }
+  }
+
+  if (
+    recordType === null ||
+    recordType < 0n
+  ) {
+    throw new Error(
+      "candid: invalid TipRecord vector type"
+    );
+  }
+
+  const recordDefinition =
+    types[Number(recordType)];
+
+  if (
+    !recordDefinition ||
+    recordDefinition.kind !== "record"
+  ) {
+    throw new Error(
+      "candid: invalid TipRecord record definition"
+    );
+  }
+
+  return value.map((item) => {
+    if (
+      !Array.isArray(item) ||
+      item.length !==
+        recordDefinition.fields.length
+    ) {
+      throw new Error(
+        "candid: invalid TipRecord"
+      );
+    }
+
+    const fields =
+      new Map<bigint, unknown>();
+
+    for (
+      let i = 0;
+      i < recordDefinition.fields.length;
+      i++
+    ) {
+      fields.set(
+        recordDefinition.fields[i].id,
+        item[i]
+      );
+    }
+
+    const from =
+      fields.get(FIELD_ID_TIP_FROM);
+
+    const to =
+      fields.get(FIELD_ID_TIP_TO);
+
+    const amount =
+      fields.get(FIELD_ID_TIP_AMOUNT);
+
+    const noteId =
+      fields.get(FIELD_ID_TIP_NOTE_ID);
+
+    const timestamp =
+      fields.get(FIELD_ID_TIP_TIMESTAMP);
+
+    if (
+      typeof from !== "string" ||
+      typeof to !== "string" ||
+      typeof amount !== "bigint" ||
+      typeof noteId !== "bigint" ||
+      typeof timestamp !== "bigint"
+    ) {
+      console.log(
+        "Decoded TipRecord fields:",
+        {
+          from,
+          to,
+          amount,
+          noteId,
+          timestamp,
+        }
+      );
+
+      console.log(
+        "Candid record fields:",
+        recordDefinition.fields
+      );
+
+      throw new Error(
+        "candid: invalid TipRecord fields"
+      );
+    }
+
+    return {
+      from: `${from.slice(0, 8)}`,
+      to: `${to.slice(0, 8)}`,
+      amount,
+      noteId,
+      timestamp,
     };
   });
 }
@@ -1134,7 +1582,7 @@ async function submitCall(
 //   callForReply() does nonce → submit → poll and returns the RAW
 //   reply hex, undecoded.
 //   call() decodes that hex as a primitive (Nat/Bool/Text), which is
-//   what add/edit/togglePin/remove still return.
+//   what add/edit/togglePin/toggleShare/remove still return.
 // listNotes() calls callForReply() directly and decodes with
 // decodeNotes() instead, since list() now goes through this same
 // update-call path (it can no longer use the plain /api/query fetch).
@@ -1332,6 +1780,74 @@ export async function listNotes(
   return decodeNotes(replyHex);
 }
 
+export async function getFeed(
+  tokenHex: string
+): Promise<FeedNote[]> {
+  const replyHex =
+    await callForReply(
+      "feed",
+      encodeTokenOnly(tokenHex)
+    );
+
+  return decodeFeedNotes(replyHex);
+}
+
+export async function getBalance(
+  tokenHex: string
+): Promise<bigint> {
+  const result =
+    await call(
+      "getBalance",
+      encodeTokenOnly(tokenHex)
+    );
+
+  if (
+    typeof result !==
+    "bigint"
+  ) {
+    throw new Error(
+      "getBalance: expected Nat reply"
+    );
+  }
+
+  return result;
+}
+
+export async function tip(
+  tokenHex: string,
+  noteId: bigint,
+  amount: bigint
+): Promise<boolean> {
+  const result =
+    await call(
+      "tip",
+      encodeTokenAndTwoNats(tokenHex, noteId, amount)
+    );
+
+  if (
+    typeof result !==
+    "boolean"
+  ) {
+    throw new Error(
+      "tip: expected Bool reply"
+    );
+  }
+
+  return result;
+}
+
+export async function getMyTips(
+  tokenHex: string
+): Promise<TipRecord[]> {
+  const replyHex =
+    await callForReply(
+      "getMyTips",
+      encodeTokenOnly(tokenHex)
+    );
+
+  return decodeTips(replyHex);
+}
+
 export async function editNote(
   tokenHex: string,
   id: bigint,
@@ -1381,6 +1897,28 @@ export async function togglePin(
   ) {
     throw new Error(
       "togglePin: expected Bool reply"
+    );
+  }
+
+  return result;
+}
+
+export async function toggleShare(
+  tokenHex: string,
+  id: bigint
+): Promise<boolean> {
+  const result =
+    await call(
+      "toggleShare",
+      encodeTokenAndNat(tokenHex, id)
+    );
+
+  if (
+    typeof result !==
+    "boolean"
+  ) {
+    throw new Error(
+      "toggleShare: expected Bool reply"
     );
   }
 

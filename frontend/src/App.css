@@ -907,3 +907,107 @@ button.secondary {
 button.secondary:hover:not(:disabled) {
   background: var(--papyrus-deep);
 }
+/* =========================================================
+   VIEW TABS (My Notes / Feed)
+   ========================================================= */
+
+.view-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 30px;
+}
+
+.view-tabs button {
+  padding: 10px 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 700;
+  transition: all 0.2s ease;
+}
+
+.view-tabs button:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.view-tabs button.active {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: white;
+}
+
+/* =========================================================
+   SHARED BADGE (on note-category pill)
+   ========================================================= */
+
+.shared-badge {
+  font-weight: 800;
+  opacity: 0.85;
+}
+.tip-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.tip-form input {
+  width: 70px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+.tip-form button {
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--primary);
+  color: white;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.tip-form button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.history-amount {
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.history-detail {
+  flex: 1;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.history-date {
+  color: var(--text-soft);
+  font-size: 11px;
+  white-space: nowrap;
+}

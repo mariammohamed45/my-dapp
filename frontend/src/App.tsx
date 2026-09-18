@@ -2,10 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import {
   addNote,
   editNote,
+  getBalance,
+  getFeed,
+  getMyTips,
   listNotes,
   removeNote,
+  tip,
   togglePin,
+  toggleShare,
 } from "./thebes";
+import type { FeedNote, TipRecord } from "./thebes";
 import { useMemphisConnect } from "./lib/useMemphisConnect";
 import type { MemphisConnectAuth } from "./lib/useMemphisConnect";
 
@@ -15,6 +21,7 @@ type Note = {
   body: string;
   category: string;
   pinned: boolean;
+  isShared: boolean;
   color: string;
   createdAt: bigint;
   updatedAt: bigint;
@@ -115,6 +122,85 @@ function NotesApp({ tokenHex }: { tokenHex: string }) {
 
   const [darkMode, setDarkMode] = useState(false);
 
+  const [view, setView] = useState<"mine" | "feed" | "history">("mine");
+  const [feedNotes, setFeedNotes] = useState<FeedNote[]>([]);
+  const [feedLoading, setFeedLoading] = useState(false);
+  const [feedError, setFeedError] = useState("");
+  const [tipAmounts, setTipAmounts] = useState<Record<string, string>>({});
+  const [tipBusyId, setTipBusyId] = useState<bigint | null>(null);
+
+  const [history, setHistory] = useState<TipRecord[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+
+  const [balance, setBalance] = useState<bigint | null>(null);
+
+  async function loadBalance() {
+    try {
+      const result = await getBalance(tokenHex);
+
+      setBalance(result);
+    } catch (e) {
+      // Non-fatal — the points pill just stays hidden if this fails.
+      console.error(e);
+    }
+  }
+
+  async function loadFeed() {
+    try {
+      setFeedError("");
+      setFeedLoading(true);
+
+      const result = await getFeed(tokenHex);
+
+      setFeedNotes(result);
+    } catch (e) {
+      setFeedError(String(e));
+    } finally {
+      setFeedLoading(false);
+    }
+  }
+
+  async function loadHistory() {
+    try {
+      setHistoryError("");
+      setHistoryLoading(true);
+
+      const result = await getMyTips(tokenHex);
+
+      setHistory(result);
+    } catch (e) {
+      setHistoryError(String(e));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  async function handleTip(noteId: bigint) {
+    const raw = tipAmounts[noteId.toString()] ?? "";
+    const parsed = Number(raw);
+
+    if (!raw.trim() || !Number.isInteger(parsed) || parsed <= 0) {
+      setFeedError("Enter a whole number of points greater than 0.");
+      return;
+    }
+
+    try {
+      setTipBusyId(noteId);
+      setFeedError("");
+
+      await tip(tokenHex, noteId, BigInt(parsed));
+
+      setTipAmounts((prev) => ({ ...prev, [noteId.toString()]: "" }));
+
+      await Promise.all([loadFeed(), loadBalance()]);
+    } catch (e) {
+      setFeedError(String(e));
+    } finally {
+      setTipBusyId(null);
+    }
+  }
+
   async function loadNotes() {
     try {
       setError("");
@@ -129,9 +215,21 @@ function NotesApp({ tokenHex }: { tokenHex: string }) {
 
   useEffect(() => {
     void loadNotes();
+    void loadBalance();
     // Reload whenever the signed-in identity changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tokenHex]);
+
+  useEffect(() => {
+    if (view === "feed") {
+      void loadFeed();
+    }
+
+    if (view === "history") {
+      void loadHistory();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, tokenHex]);
 
   useEffect(() => {
     document.documentElement.dataset.theme =
@@ -257,6 +355,21 @@ function NotesApp({ tokenHex }: { tokenHex: string }) {
     }
   }
 
+  async function handleShare(id: bigint) {
+    try {
+      setLoading(true);
+      setError("");
+
+      await toggleShare(tokenHex, id);
+
+      await loadNotes();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function confirmDelete() {
     if (deleteId === null) {
       return;
@@ -324,9 +437,72 @@ function NotesApp({ tokenHex }: { tokenHex: string }) {
             </span>
           </div>
 
+          {balance !== null && (
+            <div className="note-count points-pill">
+              {balance.toString()}
+              <span> points</span>
+            </div>
+          )}
+
         </div>
 
       </header>
+
+      {/* ───────────────── View tabs ───────────────── */}
+
+      <div className="view-tabs">
+
+        <button
+          type="button"
+          className={view === "mine" ? "active" : ""}
+          onClick={() => setView("mine")}
+        >
+          My Notes
+        </button>
+
+        <button
+          type="button"
+          className={view === "feed" ? "active" : ""}
+          onClick={() => setView("feed")}
+        >
+          Feed
+        </button>
+
+        <button
+          type="button"
+          className={view === "history" ? "active" : ""}
+          onClick={() => setView("history")}
+        >
+          History
+        </button>
+
+      </div>
+
+      {view === "feed" ? (
+
+        <FeedSection
+          notes={feedNotes}
+          loading={feedLoading}
+          error={feedError}
+          tipAmounts={tipAmounts}
+          onTipAmountChange={(id, value) =>
+            setTipAmounts((prev) => ({ ...prev, [id]: value }))
+          }
+          onTip={handleTip}
+          tipBusyId={tipBusyId}
+        />
+
+      ) : view === "history" ? (
+
+        <HistorySection
+          tips={history}
+          loading={historyLoading}
+          error={historyError}
+        />
+
+      ) : (
+
+      <>
 
       {/* ───────────────── Create / Edit ───────────────── */}
 
@@ -599,6 +775,12 @@ function NotesApp({ tokenHex }: { tokenHex: string }) {
 
                     <div className="note-category">
                       {note.category}
+                      {note.isShared && (
+                        <span className="shared-badge">
+                          {" "}
+                          · Shared
+                        </span>
+                      )}
                     </div>
 
                     <button
@@ -652,6 +834,18 @@ function NotesApp({ tokenHex }: { tokenHex: string }) {
                     <button
                       type="button"
                       onClick={() =>
+                        handleShare(note.id)
+                      }
+                      disabled={loading}
+                    >
+                      {note.isShared
+                        ? "Unshare"
+                        : "Share"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
                         startEdit(note)
                       }
                     >
@@ -681,6 +875,10 @@ function NotesApp({ tokenHex }: { tokenHex: string }) {
         )}
 
       </section>
+
+      </>
+
+      )}
 
       {/* ───────────────── Delete Modal ───────────────── */}
 
@@ -749,5 +947,231 @@ function NotesApp({ tokenHex }: { tokenHex: string }) {
       )}
 
     </main>
+  );
+}
+
+function FeedSection({
+  notes,
+  loading,
+  error,
+  tipAmounts,
+  onTipAmountChange,
+  onTip,
+  tipBusyId,
+}: {
+  notes: FeedNote[];
+  loading: boolean;
+  error: string;
+  tipAmounts: Record<string, string>;
+  onTipAmountChange: (id: string, value: string) => void;
+  onTip: (id: bigint) => void;
+  tipBusyId: bigint | null;
+}) {
+  return (
+    <section className="notes-section">
+
+      <div className="section-title">
+
+        <div>
+          <p className="section-eyebrow">
+            PUBLIC
+          </p>
+
+          <h2>Feed</h2>
+        </div>
+
+      </div>
+
+      {error && (
+        <div className="error">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+
+        <p>Loading feed...</p>
+
+      ) : notes.length === 0 ? (
+
+        <div className="empty-state">
+
+          <div className="empty-icon">✦</div>
+
+          <h3>Nothing shared yet</h3>
+
+          <p>
+            When someone shares a note, it
+            will show up here.
+          </p>
+
+        </div>
+
+      ) : (
+
+        <div className="notes-grid">
+
+          {[...notes]
+            .sort((a, b) =>
+              Number(b.updatedAt - a.updatedAt)
+            )
+            .map((note) => (
+
+              <article
+                className="note-card"
+                key={note.id.toString()}
+                style={{
+                  backgroundColor: note.color,
+                }}
+              >
+
+                <div className="note-top">
+
+                  <div className="note-category">
+                    {note.category}
+                  </div>
+
+                </div>
+
+                <h3>{note.title}</h3>
+
+                <p className="note-body">
+                  {note.body}
+                </p>
+
+                <div className="note-meta">
+                  <span>{note.author}</span>
+                </div>
+
+                <div className="tip-form">
+
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    placeholder="Points"
+                    value={
+                      tipAmounts[note.id.toString()] ?? ""
+                    }
+                    onChange={(e) =>
+                      onTipAmountChange(
+                        note.id.toString(),
+                        e.target.value
+                      )
+                    }
+                    disabled={tipBusyId !== null}
+                  />
+
+                  <button
+                    type="button"
+                    onClick={() => onTip(note.id)}
+                    disabled={tipBusyId !== null}
+                  >
+                    {tipBusyId === note.id
+                      ? "Sending..."
+                      : "Tip"}
+                  </button>
+
+                </div>
+
+              </article>
+
+            ))}
+
+        </div>
+
+      )}
+
+    </section>
+  );
+}
+
+function HistorySection({
+  tips,
+  loading,
+  error,
+}: {
+  tips: TipRecord[];
+  loading: boolean;
+  error: string;
+}) {
+  return (
+    <section className="notes-section">
+
+      <div className="section-title">
+
+        <div>
+          <p className="section-eyebrow">
+            ACTIVITY
+          </p>
+
+          <h2>History</h2>
+        </div>
+
+      </div>
+
+      {error && (
+        <div className="error">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+
+        <p>Loading history...</p>
+
+      ) : tips.length === 0 ? (
+
+        <div className="empty-state">
+
+          <div className="empty-icon">✦</div>
+
+          <h3>No tips yet</h3>
+
+          <p>
+            Points you send or receive will
+            show up here.
+          </p>
+
+        </div>
+
+      ) : (
+
+        <div className="history-list">
+
+          {[...tips]
+            .sort((a, b) =>
+              Number(b.timestamp - a.timestamp)
+            )
+            .map((entry, index) => (
+
+              <div
+                className="history-row"
+                key={index}
+              >
+
+                <span className="history-amount">
+                  {entry.amount.toString()} pts
+                </span>
+
+                <span className="history-detail">
+                  {entry.from} → {entry.to}
+                  {" · note #"}
+                  {entry.noteId.toString()}
+                </span>
+
+                <span className="history-date">
+                  {formatDate(entry.timestamp)}
+                </span>
+
+              </div>
+
+            ))}
+
+        </div>
+
+      )}
+
+    </section>
   );
 }
