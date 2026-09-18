@@ -1,0 +1,111 @@
+/* =========================================================
+   AUTH GATE — append this block to the end of App.css
+   ========================================================= */
+
+.auth-gate {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.auth-card {
+  width: min(420px, 100%);
+  padding: 34px 30px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.auth-card h1 {
+  margin: 6px 0 10px;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 28px;
+  letter-spacing: -0.02em;
+}
+
+.auth-card > p {
+  margin: 0 0 22px;
+  color: var(--text-soft);
+  font-size: 14px;
+}
+
+.auth-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.auth-card input {
+  height: 46px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-soft);
+  color: var(--text);
+  text-align: center;
+}
+
+.auth-card input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 4px rgba(91, 95, 245, 0.1);
+}
+
+.auth-card form button[type="submit"] {
+  height: 46px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--primary);
+  color: white;
+  font-weight: 700;
+}
+
+.auth-card form button[type="submit"]:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.confirm-create {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.confirm-create-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
+
+.confirm-create-actions button {
+  height: 42px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--primary);
+  color: white;
+  font-weight: 700;
+}
+
+.auth-note {
+  margin-top: 18px;
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.session-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: min(920px, calc(100% - 40px));
+  margin: 20px auto 0;
+  padding: 12px 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 13px;
+}

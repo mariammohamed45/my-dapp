@@ -1,19 +1,11 @@
-import Array "mo:base/Array";
-import Principal "mo:base/Principal";
-import Time "mo:base/Time";
-import Blob "mo:base/Blob";
-import Debug "mo:base/Debug";
-
+import Array "mo:core/Array";
+import Time "mo:core/Time";
+import Principal "mo:core/Principal";
+import Blob "mo:core/Blob";
+import Runtime "mo:core/Runtime";
 import MemphisAuth "mo:thebes-lib/MemphisAuth";
 
 persistent actor Notes {
-
-  // ============================================================
-  // PUBLIC NOTE TYPE
-  // IMPORTANT:
-  // Keep this shape unchanged.
-  // The frontend Candid decoder depends on these fields.
-  // ============================================================
 
   public type Note = {
     id : Nat;
@@ -24,314 +16,269 @@ persistent actor Notes {
     color : Text;
     createdAt : Int;
     updatedAt : Int;
-  };
-
-  // ============================================================
-  // PRIVATE STORAGE TYPE
-  // ============================================================
-
-  type OwnedNote = {
     owner : Principal;
-    note : Note;
   };
 
-  var notes : [OwnedNote] = [];
+  var notes : [Note] = [];
   var nextId : Nat = 0;
 
-  // ============================================================
-  // MEMPHIS AUTHENTICATION
-  // ============================================================
-
-  // Memphis production contract.
-  // CID 921.
-  //
-  // "my-dapp" is the stable pseudonym namespace.
-  // DO NOT change this after users have created data.
-  //
-  // Version 1 is our identity-scheme version.
-  var gate = MemphisAuth.initFromCid(
-    921,
-    "my-dapp",
-    1
-  );
-
-  // This MUST be the exact web origin where the app is served.
-  // No trailing slash.
-  // No path.
-  // No port.
-  let AUDIENCE = "https://memphis.mercaturaforum.com";
-
-  // ------------------------------------------------------------
-  // Verify Memphis session token and return the user's
-  // stable per-app Principal.
-  // ------------------------------------------------------------
-
-  func authenticate(
-    session : Blob
-  ) : async* Principal {
-
-    switch (
-      await* MemphisAuth.verifyWithAudience(
-        gate,
-        session,
-        AUDIENCE
-      )
-    ) {
-
-      case (#ok(identity)) {
-        identity.principal
-      };
-
-      case (#err(_)) {
-        Debug.trap(
-          "Memphis authentication failed"
-        )
-      };
-    }
+  func appendOne<T>(arr : [T], item : T) : [T] {
+    Array.tabulate<T>(
+      arr.size() + 1,
+      func(i : Nat) : T {
+        if (i < arr.size()) {
+          arr[i]
+        } else {
+          item
+        };
+      },
+    );
   };
 
-  // ============================================================
-  // ADD
-  // ============================================================
+  transient let AUDIENCE = "https://memphis.mercaturaforum.com";
 
-  public shared func add(
-    session : Blob,
+  let gate = MemphisAuth.initFromCid(921, AUDIENCE, 0);
+
+  func requireCaller(token : Blob) : async* Principal {
+    switch (await* MemphisAuth.verifyWithAudience(gate, token, AUDIENCE)) {
+
+      case (#ok(identity)) {
+        identity.principal;
+      };
+
+      case (#err(#Expired)) {
+        Runtime.trap("session expired - please sign in again");
+      };
+
+      case (#err(#Memphis(err))) {
+        switch (err) {
+
+          case (#NotAuthenticated) {
+            Runtime.trap("Memphis: NotAuthenticated");
+          };
+
+          case (#Unauthorized) {
+            Runtime.trap("Memphis: Unauthorized");
+          };
+
+          case (#SessionExpired) {
+            Runtime.trap("Memphis: SessionExpired");
+          };
+
+          case (#ChallengeExpired) {
+            Runtime.trap("Memphis: ChallengeExpired");
+          };
+
+          case (#AnchorNotFound) {
+            Runtime.trap("Memphis: AnchorNotFound");
+          };
+
+          case (#FactorNotFound) {
+            Runtime.trap("Memphis: FactorNotFound");
+          };
+
+          case (#InsufficientFactors) {
+            Runtime.trap("Memphis: InsufficientFactors");
+          };
+
+          case (#DuplicateCredential) {
+            Runtime.trap("Memphis: DuplicateCredential");
+          };
+
+          case (#InvalidArgument(msg)) {
+            Runtime.trap("Memphis: InvalidArgument - " # msg);
+          };
+
+          case (#InvariantViolation(e)) {
+            Runtime.trap(
+              "Memphis: InvariantViolation - "
+              # e.id
+              # " - "
+              # e.details
+            );
+          };
+        };
+      };
+    };
+  };
+
+  public func add(
+    token : Blob,
     title : Text,
     body : Text,
     category : Text,
     color : Text
   ) : async Nat {
-
-    let owner = await* authenticate(session);
-
+    let caller = await* requireCaller(token);
     let now = Time.now();
 
     let newNote : Note = {
       id = nextId;
-      title = title;
-      body = body;
-      category = category;
+      title;
+      body;
+      category;
       pinned = false;
-      color = color;
+      color;
       createdAt = now;
       updatedAt = now;
+      owner = caller;
     };
 
-    let ownedNote : OwnedNote = {
-      owner = owner;
-      note = newNote;
-    };
-
-    notes := Array.append(
-      notes,
-      [ownedNote]
-    );
-
+    notes := appendOne(notes, newNote);
     nextId += 1;
 
-    newNote.id
+    newNote.id;
   };
 
-  // ============================================================
-  // LIST
-  //
-  // IMPORTANT:
-  // This is intentionally NOT a query.
-  // Memphis verification requires an inter-canister update call.
-  // ============================================================
+  public func list(token : Blob) : async [Note] {
+    let caller = await* requireCaller(token);
 
-  public shared func list(
-    session : Blob
-  ) : async [Note] {
-
-    let owner = await* authenticate(session);
-
-    Array.mapFilter<OwnedNote, Note>(
+    Array.filter<Note>(
       notes,
-      func(item : OwnedNote) : ?Note {
-        if (
-          Principal.equal(
-            item.owner,
-            owner
-          )
-        ) {
-          ?item.note
-        } else {
-          null
-        }
-      }
-    )
+      func(n : Note) : Bool {
+        n.owner == caller
+      },
+    );
   };
 
-  // ============================================================
-  // EDIT
-  // ============================================================
-
-  public shared func edit(
-    session : Blob,
+  public func edit(
+    token : Blob,
     id : Nat,
     title : Text,
     body : Text,
     category : Text,
     color : Text
   ) : async Bool {
+    let caller = await* requireCaller(token);
 
-    let owner = await* authenticate(session);
-
-    let oldNote = Array.find<OwnedNote>(
+    let found = Array.find<Note>(
       notes,
-      func(item : OwnedNote) : Bool {
-        Principal.equal(
-          item.owner,
-          owner
-        )
-        and item.note.id == id
-      }
+      func(n : Note) : Bool {
+        n.id == id
+      },
     );
 
-    switch (oldNote) {
+    switch (found) {
 
-      case (null) {
-        false
+      case null {
+        false;
       };
 
-      case (?ownedNote) {
+      case (?note) {
 
-        let note = ownedNote.note;
+        if (note.owner != caller) {
+          Runtime.trap("not your note");
+        };
 
-        let updatedNote : Note = {
-          id = note.id;
-          title = title;
-          body = body;
-          category = category;
-          pinned = note.pinned;
-          color = color;
-          createdAt = note.createdAt;
+        let updated : Note = {
+          note with
+          title;
+          body;
+          category;
+          color;
           updatedAt = Time.now();
         };
 
-        notes := Array.map<OwnedNote, OwnedNote>(
+        notes := Array.map<Note, Note>(
           notes,
-          func(item : OwnedNote) : OwnedNote {
-
-            if (
-              Principal.equal(
-                item.owner,
-                owner
-              )
-              and item.note.id == id
-            ) {
-              {
-                owner = item.owner;
-                note = updatedNote;
-              }
+          func(n : Note) : Note {
+            if (n.id == id) {
+              updated
             } else {
-              item
-            }
-          }
+              n
+            };
+          },
         );
 
-        true
+        true;
       };
-    }
+    };
   };
 
-  // ============================================================
-  // TOGGLE PIN
-  // ============================================================
-
-  public shared func togglePin(
-    session : Blob,
+  public func togglePin(
+    token : Blob,
     id : Nat
   ) : async Bool {
+    let caller = await* requireCaller(token);
 
-    let owner = await* authenticate(session);
-
-    let oldNote = Array.find<OwnedNote>(
+    let found = Array.find<Note>(
       notes,
-      func(item : OwnedNote) : Bool {
-        Principal.equal(
-          item.owner,
-          owner
-        )
-        and item.note.id == id
-      }
+      func(n : Note) : Bool {
+        n.id == id
+      },
     );
 
-    switch (oldNote) {
+    switch (found) {
 
-      case (null) {
-        false
+      case null {
+        false;
       };
 
-      case (?ownedNote) {
+      case (?note) {
 
-        let note = ownedNote.note;
+        if (note.owner != caller) {
+          Runtime.trap("not your note");
+        };
 
-        let updatedNote : Note = {
-          id = note.id;
-          title = note.title;
-          body = note.body;
-          category = note.category;
+        let updated : Note = {
+          note with
           pinned = not note.pinned;
-          color = note.color;
-          createdAt = note.createdAt;
           updatedAt = Time.now();
         };
 
-        notes := Array.map<OwnedNote, OwnedNote>(
+        notes := Array.map<Note, Note>(
           notes,
-          func(item : OwnedNote) : OwnedNote {
-
-            if (
-              Principal.equal(
-                item.owner,
-                owner
-              )
-              and item.note.id == id
-            ) {
-              {
-                owner = item.owner;
-                note = updatedNote;
-              }
+          func(n : Note) : Note {
+            if (n.id == id) {
+              updated
             } else {
-              item
-            }
-          }
+              n
+            };
+          },
         );
 
-        true
+        true;
       };
-    }
+    };
   };
 
-  // ============================================================
-  // REMOVE
-  // ============================================================
-
-  public shared func remove(
-    session : Blob,
+  public func remove(
+    token : Blob,
     id : Nat
   ) : async Bool {
+    let caller = await* requireCaller(token);
 
-    let owner = await* authenticate(session);
-
-    let oldSize = notes.size();
-
-    notes := Array.filter<OwnedNote>(
+    let found = Array.find<Note>(
       notes,
-      func(item : OwnedNote) : Bool {
-
-        not (
-          Principal.equal(
-            item.owner,
-            owner
-          )
-          and item.note.id == id
-        )
-      }
+      func(n : Note) : Bool {
+        n.id == id
+      },
     );
 
-    notes.size() < oldSize
+    switch (found) {
+
+      case null {
+        false;
+      };
+
+      case (?note) {
+
+        if (note.owner != caller) {
+          Runtime.trap("not your note");
+        };
+
+        let oldSize = notes.size();
+
+        notes := Array.filter<Note>(
+          notes,
+          func(n : Note) : Bool {
+            n.id != id
+          },
+        );
+
+        notes.size() < oldSize;
+      };
+    };
   };
-}
+};
+

@@ -1,5 +1,12 @@
 // thebes.ts
 // Client for the Thebes backend canister.
+//
+// CHANGE FROM TASK 1: every method now requires a Memphis session token
+// (hex string, from useMemphis()/MemphisGate) as its first argument,
+// because the backend verifies the caller's identity before touching
+// any data. `list` moved from a plain query fetch to the same
+// call→nonce→submit→poll-receipt flow as the write methods, since
+// identity verification requires an update call.
 
 export const BACKEND_CANISTER_ID = 55053167656008;
 
@@ -31,45 +38,13 @@ function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(clean.length / 2);
 
   for (let i = 0; i < bytes.length; i++) {
-    const value = parseInt(
+    bytes[i] = parseInt(
       clean.slice(i * 2, i * 2 + 2),
       16
     );
-
-    if (Number.isNaN(value)) {
-      throw new Error("invalid hex value");
-    }
-
-    bytes[i] = value;
   }
 
   return bytes;
-}
-
-// ─────────────────────────────────────────────────────────────
-// Memphis session
-// ─────────────────────────────────────────────────────────────
-
-function getSessionTokenHex(): string {
-  const api = (
-    window as typeof window & {
-      MemphisPasskey?: {
-        loadSession?: () => {
-          session_token_hex?: string;
-        } | null;
-      };
-    }
-  ).MemphisPasskey;
-
-  const session = api?.loadSession?.();
-
-  if (!session?.session_token_hex) {
-    throw new Error(
-      "Please sign in with your Memphis passkey first."
-    );
-  }
-
-  return session.session_token_hex;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -125,7 +100,9 @@ function ulebDecode(
     const byte = buf[off++];
 
     if (byte === undefined) {
-      throw new Error("candid: truncated uleb128");
+      throw new Error(
+        "candid: truncated uleb128"
+      );
     }
 
     result |=
@@ -150,7 +127,9 @@ function slebDecode(
     const byte = buf[off++];
 
     if (byte === undefined) {
-      throw new Error("candid: truncated sleb128");
+      throw new Error(
+        "candid: truncated sleb128"
+      );
     }
 
     result |=
@@ -186,10 +165,26 @@ const TYPE_NAT8 = -5n;
 const TYPE_TEXT = -15n;
 const TYPE_VEC = -19n;
 const TYPE_RECORD = -20n;
+const TYPE_PRINCIPAL = -24n;
 
 // ─────────────────────────────────────────────────────────────
 // Candid record field IDs
+// IMPORTANT:
+// These IDs must match the field names in Backend.mo.
+// Computed by candidFieldHash(name) — see that function below;
+// the constants are pinned here rather than recomputed on every
+// decode for clarity of what each one means.
 // ─────────────────────────────────────────────────────────────
+
+function candidFieldHash(name: string): bigint {
+  let h = 0n;
+
+  for (const byte of new TextEncoder().encode(name)) {
+    h = (h * 223n + BigInt(byte)) & 0xffffffffn;
+  }
+
+  return h;
+}
 
 const FIELD_ID_ID = 23515n;
 const FIELD_ID_TITLE = 272307608n;
@@ -199,13 +194,24 @@ const FIELD_ID_PINNED = 2249497368n;
 const FIELD_ID_COLOR = 1247572323n;
 const FIELD_ID_CREATED_AT = 1240611067n;
 const FIELD_ID_UPDATED_AT = 2196848654n;
+// New in Task 2 — present on the wire but never read into the Note
+// the UI displays (list() only ever returns the caller's own notes,
+// so surfacing owner separately would be redundant).
+// Computed for documentation/parity with Backend.mo's `owner` field.
+// Not read anywhere: list() only ever returns the caller's own notes,
+// so surfacing owner separately would be redundant. Prefixed with
+// void to satisfy noUnusedLocals without deleting the derivation.
+void candidFieldHash("owner");
 
 // ─────────────────────────────────────────────────────────────
 // Candid encoders
 // ─────────────────────────────────────────────────────────────
 
-function encodeTextValue(text: string): number[] {
-  const utf8 = new TextEncoder().encode(text);
+function encodeTextValue(
+  text: string
+): number[] {
+  const utf8 =
+    new TextEncoder().encode(text);
 
   return [
     ...uleb(BigInt(utf8.length)),
@@ -213,136 +219,124 @@ function encodeTextValue(text: string): number[] {
   ];
 }
 
-function encodeBlobValue(hex: string): number[] {
-  const bytes = hexToBytes(hex);
-
-  return [
-    ...uleb(BigInt(bytes.length)),
-    ...bytes,
-  ];
-}
-
-// (blob)
-function encodeSessionOnly(
-  sessionHex: string
-): string {
+export function encodeEmpty(): string {
   return bytesToHex(
     new Uint8Array([
       ...MAGIC,
-
-      // type table count
-      1,
-
-      // type 0 = vec nat8
-      ...sleb(TYPE_VEC),
-      ...sleb(TYPE_NAT8),
-
-      // argument count
-      1,
-
-      // argument type = type 0
       0,
-
-      // value
-      ...encodeBlobValue(sessionHex),
+      0,
     ])
   );
 }
 
-// (blob, text, text, text, text)
-function encodeSessionAndFourTexts(
-  sessionHex: string,
+export function encodeText(
+  text: string
+): string {
+  return bytesToHex(
+    new Uint8Array([
+      ...MAGIC,
+      0,
+      1,
+      ...sleb(TYPE_TEXT),
+      ...encodeTextValue(text),
+    ])
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Token-first argument encoding
+//
+// Every backend method now takes a session token (blob) as its first
+// argument. `blob` is a compound type (vec nat8), so per the Candid
+// binary format it must live in the type table and be referenced by
+// index — it cannot appear as a bare inline opcode the way primitives
+// (nat, text, bool...) can. We build one type-table entry (index 0 =
+// "vec nat8") and every call references it for the token; all other
+// arguments stay as direct primitive opcodes, same as Task 1.
+// ─────────────────────────────────────────────────────────────
+
+type ExtraArg = {
+  type: bigint;
+  valueBytes: number[];
+};
+
+function encodeTokenArgs(
+  tokenHex: string,
+  extra: ExtraArg[]
+): string {
+  const tokenBytes = hexToBytes(tokenHex);
+
+  const out: number[] = [...MAGIC];
+
+  // Type table: one entry, T0 = vec nat8 (blob).
+  out.push(...uleb(1n));
+  out.push(...sleb(TYPE_VEC));
+  out.push(...sleb(TYPE_NAT8));
+
+  // Arg types: token (table ref 0) followed by any extra primitives.
+  out.push(...uleb(BigInt(1 + extra.length)));
+  out.push(...sleb(0n));
+  for (const e of extra) {
+    out.push(...sleb(e.type));
+  }
+
+  // Values, in the same order.
+  out.push(...uleb(BigInt(tokenBytes.length)));
+  out.push(...Array.from(tokenBytes));
+  for (const e of extra) {
+    out.push(...e.valueBytes);
+  }
+
+  return bytesToHex(new Uint8Array(out));
+}
+
+// (blob token)
+function encodeTokenOnly(tokenHex: string): string {
+  return encodeTokenArgs(tokenHex, []);
+}
+
+// (blob token, nat id)
+function encodeTokenAndNat(
+  tokenHex: string,
+  id: bigint
+): string {
+  return encodeTokenArgs(tokenHex, [
+    { type: TYPE_NAT, valueBytes: uleb(id) },
+  ]);
+}
+
+// (blob token, text, text, text, text) — add()
+function encodeTokenAndFourTexts(
+  tokenHex: string,
   title: string,
   body: string,
   category: string,
   color: string
 ): string {
-  return bytesToHex(
-    new Uint8Array([
-      ...MAGIC,
-
-      1,
-
-      ...sleb(TYPE_VEC),
-      ...sleb(TYPE_NAT8),
-
-      5,
-
-      0,
-      ...sleb(TYPE_TEXT),
-      ...sleb(TYPE_TEXT),
-      ...sleb(TYPE_TEXT),
-      ...sleb(TYPE_TEXT),
-
-      ...encodeBlobValue(sessionHex),
-      ...encodeTextValue(title),
-      ...encodeTextValue(body),
-      ...encodeTextValue(category),
-      ...encodeTextValue(color),
-    ])
-  );
+  return encodeTokenArgs(tokenHex, [
+    { type: TYPE_TEXT, valueBytes: encodeTextValue(title) },
+    { type: TYPE_TEXT, valueBytes: encodeTextValue(body) },
+    { type: TYPE_TEXT, valueBytes: encodeTextValue(category) },
+    { type: TYPE_TEXT, valueBytes: encodeTextValue(color) },
+  ]);
 }
 
-// (blob, nat, text, text, text, text)
-function encodeSessionNatAndFourTexts(
-  sessionHex: string,
+// (blob token, nat id, text, text, text, text) — edit()
+function encodeTokenNatAndFourTexts(
+  tokenHex: string,
   id: bigint,
   title: string,
   body: string,
   category: string,
   color: string
 ): string {
-  return bytesToHex(
-    new Uint8Array([
-      ...MAGIC,
-
-      1,
-
-      ...sleb(TYPE_VEC),
-      ...sleb(TYPE_NAT8),
-
-      6,
-
-      0,
-      ...sleb(TYPE_NAT),
-      ...sleb(TYPE_TEXT),
-      ...sleb(TYPE_TEXT),
-      ...sleb(TYPE_TEXT),
-      ...sleb(TYPE_TEXT),
-
-      ...encodeBlobValue(sessionHex),
-      ...uleb(id),
-      ...encodeTextValue(title),
-      ...encodeTextValue(body),
-      ...encodeTextValue(category),
-      ...encodeTextValue(color),
-    ])
-  );
-}
-
-// (blob, nat)
-function encodeSessionAndNat(
-  sessionHex: string,
-  id: bigint
-): string {
-  return bytesToHex(
-    new Uint8Array([
-      ...MAGIC,
-
-      1,
-
-      ...sleb(TYPE_VEC),
-      ...sleb(TYPE_NAT8),
-
-      2,
-
-      0,
-      ...sleb(TYPE_NAT),
-
-      ...encodeBlobValue(sessionHex),
-      ...uleb(id),
-    ])
-  );
+  return encodeTokenArgs(tokenHex, [
+    { type: TYPE_NAT, valueBytes: uleb(id) },
+    { type: TYPE_TEXT, valueBytes: encodeTextValue(title) },
+    { type: TYPE_TEXT, valueBytes: encodeTextValue(body) },
+    { type: TYPE_TEXT, valueBytes: encodeTextValue(category) },
+    { type: TYPE_TEXT, valueBytes: encodeTextValue(color) },
+  ]);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -355,13 +349,16 @@ function readText(
 ): [string, number] {
   let len: bigint;
 
-  [len, off] = ulebDecode(buf, off);
+  [len, off] =
+    ulebDecode(buf, off);
 
   const size = Number(len);
   const end = off + size;
 
   if (end > buf.length) {
-    throw new Error("candid: truncated text");
+    throw new Error(
+      "candid: truncated text"
+    );
   }
 
   return [
@@ -386,6 +383,35 @@ function readInt(
   return slebDecode(buf, off);
 }
 
+// Candid principal value encoding: a 1-byte transparency tag (always
+// 0x01 for a real principal — "opaque reference" form is not used by
+// Motoko), then uleb128 length, then the raw principal bytes. We
+// return it as a hex string; nothing in the UI currently reads it.
+function readPrincipal(
+  buf: Uint8Array,
+  off: number
+): [string, number] {
+  const tag = buf[off++];
+
+  if (tag !== 1) {
+    throw new Error(
+      `candid: unsupported principal tag ${tag}`
+    );
+  }
+
+  let len: bigint;
+
+  [len, off] = ulebDecode(buf, off);
+
+  const size = Number(len);
+  const end = off + size;
+
+  return [
+    bytesToHex(buf.slice(off, end)),
+    end,
+  ];
+}
+
 type CandidType =
   | {
       kind: "vec";
@@ -406,7 +432,11 @@ function readTypeTable(
 ): [CandidType[], number] {
   const types: CandidType[] = [];
 
-  for (let i = 0n; i < count; i++) {
+  for (
+    let i = 0n;
+    i < count;
+    i++
+  ) {
     let typeCode: bigint;
 
     [typeCode, off] =
@@ -473,12 +503,17 @@ function readTypeTable(
   return [types, off];
 }
 
+// ─────────────────────────────────────────────────────────────
+// Candid value decoder
+// ─────────────────────────────────────────────────────────────
+
 function decodeValue(
   buf: Uint8Array,
   off: number,
   type: bigint,
   types: CandidType[]
 ): [unknown, number] {
+
   if (type === TYPE_NAT) {
     return readNat(buf, off);
   }
@@ -489,12 +524,17 @@ function decodeValue(
 
   if (type === TYPE_BOOL) {
     if (off >= buf.length) {
-      throw new Error("candid: truncated bool");
+      throw new Error(
+        "candid: truncated bool"
+      );
     }
 
     const value = buf[off];
 
-    if (value !== 0 && value !== 1) {
+    if (
+      value !== 0 &&
+      value !== 1
+    ) {
       throw new Error(
         `candid: invalid bool value ${value}`
       );
@@ -510,9 +550,13 @@ function decodeValue(
     return readText(buf, off);
   }
 
+  if (type === TYPE_PRINCIPAL) {
+    return readPrincipal(buf, off);
+  }
+
   if (type >= 0n) {
-    const definition =
-      types[Number(type)];
+    const index = Number(type);
+    const definition = types[index];
 
     if (!definition) {
       throw new Error(
@@ -520,7 +564,9 @@ function decodeValue(
       );
     }
 
-    if (definition.kind === "vec") {
+    if (
+      definition.kind === "vec"
+    ) {
       let length: bigint;
 
       [length, off] =
@@ -552,11 +598,14 @@ function decodeValue(
       ];
     }
 
-    if (definition.kind === "record") {
+    if (
+      definition.kind === "record"
+    ) {
       const values: unknown[] = [];
 
       for (
-        const field of definition.fields
+        const field of
+          definition.fields
       ) {
         let value: unknown;
 
@@ -584,13 +633,14 @@ function decodeValue(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Primitive reply decoder
+// Decode primitive reply
 // ─────────────────────────────────────────────────────────────
 
 export function decodeReply(
   hex: string
 ): string | bigint | boolean {
-  const buf = hexToBytes(hex);
+  const buf =
+    hexToBytes(hex);
 
   if (
     buf.length < 4 ||
@@ -662,13 +712,14 @@ export function decodeReply(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Note list decoder
+// Decode Note list
 // ─────────────────────────────────────────────────────────────
 
 export function decodeNotes(
   hex: string
 ): Note[] {
-  const buf = hexToBytes(hex);
+  const buf =
+    hexToBytes(hex);
 
   if (
     buf.length < 4 ||
@@ -813,6 +864,10 @@ export function decodeNotes(
     const updatedAt =
       fields.get(FIELD_ID_UPDATED_AT);
 
+    // `owner` is present on the wire (fields.get(FIELD_ID_OWNER)) but
+    // deliberately not surfaced — every note list() returns already
+    // belongs to the caller, so it adds nothing the UI needs.
+
     if (
       typeof id !== "bigint" ||
       typeof title !== "string" ||
@@ -862,6 +917,12 @@ export function decodeNotes(
 
 // ─────────────────────────────────────────────────────────────
 // Sender
+//
+// This is the TRANSPORT sender for the /api/call envelope — it is NOT
+// the user's identity. The backend never reads it for authorization
+// anymore; identity comes exclusively from the Memphis session token
+// passed as the first Candid argument. Kept as-is so the envelope
+// routing (nonce tracking, replay protection) keeps working.
 // ─────────────────────────────────────────────────────────────
 
 function demoSender(): string {
@@ -977,7 +1038,9 @@ async function fetchWithRetry(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Query - kept for compatibility, but private list does NOT use it
+// Query (kept for completeness — no longer used by list(), since
+// verifying a session token requires an update call. Left in place in
+// case a future truly-public query method is added.)
 // ─────────────────────────────────────────────────────────────
 
 export async function query(
@@ -1019,7 +1082,7 @@ export async function query(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Submit update call
+// Submit call
 // ─────────────────────────────────────────────────────────────
 
 async function submitCall(
@@ -1067,71 +1130,20 @@ async function submitCall(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Raw receipt
+// Generic update call — now split in two:
+//   callForReply() does nonce → submit → poll and returns the RAW
+//   reply hex, undecoded.
+//   call() decodes that hex as a primitive (Nat/Bool/Text), which is
+//   what add/edit/togglePin/remove still return.
+// listNotes() calls callForReply() directly and decodes with
+// decodeNotes() instead, since list() now goes through this same
+// update-call path (it can no longer use the plain /api/query fetch).
 // ─────────────────────────────────────────────────────────────
 
-async function pollReceiptRaw(
-  hashHex: string
-): Promise<string> {
-  const deadline =
-    Date.now() + 30_000;
-
-  let transientPolls = 0;
-
-  while (
-    Date.now() < deadline
-  ) {
-    try {
-      const response =
-        await fetchWithRetry(
-          `${BASE}/api/receipt?hash=${hashHex}`
-        );
-
-      if (response.found) {
-        if (
-          response.status ===
-          "success"
-        ) {
-          return response.reply || "";
-        }
-
-        throw new Error(
-          response.error ||
-            "call failed on chain"
-        );
-      }
-    } catch (e) {
-      transientPolls++;
-
-      if (
-        transientPolls > 10
-      ) {
-        throw e;
-      }
-    }
-
-    await new Promise(
-      (resolve) =>
-        setTimeout(
-          resolve,
-          500
-        )
-    );
-  }
-
-  throw new Error(
-    "timed out waiting for the chain's receipt"
-  );
-}
-
-// ─────────────────────────────────────────────────────────────
-// Generic update call
-// ─────────────────────────────────────────────────────────────
-
-export async function call(
+async function callForReply(
   method: string,
   argHex: string
-): Promise<string | bigint | boolean> {
+): Promise<string> {
   const sender =
     demoSender();
 
@@ -1197,34 +1209,98 @@ export async function call(
     );
   }
 
-  const rawReply =
-    await pollReceiptRaw(
-      response.message_hash
-    );
+  return pollReceiptHex(
+    response.message_hash
+  );
+}
 
-  return decodeReply(
-    rawReply
+export async function call(
+  method: string,
+  argHex: string
+): Promise<string | bigint | boolean> {
+  const replyHex =
+    await callForReply(method, argHex);
+
+  return decodeReply(replyHex);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Receipt — returns the raw reply hex; decoding is the caller's job
+// (a primitive via decodeReply, or a Note vector via decodeNotes).
+// ─────────────────────────────────────────────────────────────
+
+async function pollReceiptHex(
+  hashHex: string
+): Promise<string> {
+  const deadline =
+    Date.now() + 30_000;
+
+  let transientPolls = 0;
+
+  while (
+    Date.now() < deadline
+  ) {
+    try {
+      const response =
+        await fetchWithRetry(
+          `${BASE}/api/receipt?hash=${hashHex}`
+        );
+
+      if (response.found) {
+        if (
+          response.status ===
+          "success"
+        ) {
+          return response.reply || "";
+        }
+
+        throw new Error(
+          response.error ||
+            "call failed on chain"
+        );
+      }
+    } catch (e) {
+      transientPolls++;
+
+      if (
+        transientPolls > 10
+      ) {
+        throw e;
+      }
+    }
+
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          500
+        )
+    );
+  }
+
+  throw new Error(
+    "timed out waiting for the chain's receipt"
   );
 }
 
 // ─────────────────────────────────────────────────────────────
-// Notes API
+// Notes API — every method now takes tokenHex as its first argument.
+// Get it from useMemphis()'s session.session_token_hex, passed down
+// through MemphisGate.
 // ─────────────────────────────────────────────────────────────
 
 export async function addNote(
+  tokenHex: string,
   title: string,
   body: string,
   category: string,
   color: string
 ): Promise<bigint> {
-  const session =
-    getSessionTokenHex();
-
   const result =
     await call(
       "add",
-      encodeSessionAndFourTexts(
-        session,
+      encodeTokenAndFourTexts(
+        tokenHex,
         title,
         body,
         category,
@@ -1244,100 +1320,31 @@ export async function addNote(
   return result;
 }
 
-export async function listNotes(): Promise<Note[]> {
-  const session =
-    getSessionTokenHex();
-
-  const sender =
-    demoSender();
-
-  const nonceResponse =
-    await fetchWithRetry(
-      `${BASE}/api/next_nonce?sender=${sender}`,
-      {
-        cache: "no-store",
-      }
-    );
-
-  if (
-    typeof nonceResponse.next_nonce !==
-    "number"
-  ) {
-    throw new Error(
-      "malformed next_nonce reply"
-    );
-  }
-
-  let response =
-    await submitCall(
+export async function listNotes(
+  tokenHex: string
+): Promise<Note[]> {
+  const replyHex =
+    await callForReply(
       "list",
-      encodeSessionOnly(session),
-      sender,
-      nonceResponse.next_nonce
+      encodeTokenOnly(tokenHex)
     );
 
-  if (
-    !response.queued &&
-    typeof response.error ===
-      "string" &&
-    /nonce .* already used/i.test(
-      response.error
-    )
-  ) {
-    const match =
-      response.error.match(
-        /last seen:\s*(\d+)/i
-      );
-
-    const recoveredNonce =
-      match
-        ? Number(match[1]) + 1
-        : nonceResponse.next_nonce + 1;
-
-    response =
-      await submitCall(
-        "list",
-        encodeSessionOnly(session),
-        sender,
-        recoveredNonce
-      );
-  }
-
-  if (
-    !response.queued ||
-    !response.message_hash
-  ) {
-    throw new Error(
-      response.error ||
-        "list call rejected"
-    );
-  }
-
-  const rawReply =
-    await pollReceiptRaw(
-      response.message_hash
-    );
-
-  return decodeNotes(
-    rawReply
-  );
+  return decodeNotes(replyHex);
 }
 
 export async function editNote(
+  tokenHex: string,
   id: bigint,
   title: string,
   body: string,
   category: string,
   color: string
 ): Promise<boolean> {
-  const session =
-    getSessionTokenHex();
-
   const result =
     await call(
       "edit",
-      encodeSessionNatAndFourTexts(
-        session,
+      encodeTokenNatAndFourTexts(
+        tokenHex,
         id,
         title,
         body,
@@ -1359,18 +1366,13 @@ export async function editNote(
 }
 
 export async function togglePin(
+  tokenHex: string,
   id: bigint
 ): Promise<boolean> {
-  const session =
-    getSessionTokenHex();
-
   const result =
     await call(
       "togglePin",
-      encodeSessionAndNat(
-        session,
-        id
-      )
+      encodeTokenAndNat(tokenHex, id)
     );
 
   if (
@@ -1386,18 +1388,13 @@ export async function togglePin(
 }
 
 export async function removeNote(
+  tokenHex: string,
   id: bigint
 ): Promise<boolean> {
-  const session =
-    getSessionTokenHex();
-
   const result =
     await call(
       "remove",
-      encodeSessionAndNat(
-        session,
-        id
-      )
+      encodeTokenAndNat(tokenHex, id)
     );
 
   if (
